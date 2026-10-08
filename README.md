@@ -1,0 +1,1 @@
+`python ..\..\PS5-SELF-TO-ELF\self_to_elf.py .\app0\`
