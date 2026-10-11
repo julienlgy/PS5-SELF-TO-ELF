@@ -56,11 +56,22 @@ python self_to_elf.py /path/to/directory --max-output-mib 1024
 
 ```bash
 $ python self_to_elf.py ./app0/
-OK: ./app0/eboot.prx: ELF 2457600 bytes; original: eboot.prx.bak
-OK: ./app0/libSceSysmodule.prx: ELF 102400 bytes; original: libSceSysmodule.prx.bak
-SKIP: ./app0/data.bin: unrecognized format; header: 00 00 00 00 ...
-Converted=2; repaired=0; ready=0; skipped=1; failed=0
+
+  ...ASCII banner...
+
+  RESULTS
+  ┌───┬────────────┬──────────────────────┬────────────┬───────────────────────────────┐
+  │ # │ STATUS     │ FILE                 │ SIZE       │ NOTE                          │
+  ├───┼────────────┼──────────────────────┼────────────┼───────────────────────────────┤
+  │ 1 │ ✔ OK       │ eboot.prx            │ 2.3 MiB    │ backup: eboot.prx.bak         │
+  │ 2 │ ✔ OK       │ libSceSysmodule.prx  │ 100.0 KiB  │ backup: libSceSysmodule.prx.bak │
+  │ 3 │ • SKIP     │ data.prx             │ -          │ unrecognized format; ...      │
+  └───┴────────────┴──────────────────────┴────────────┴───────────────────────────────┘
+
+  TOTALS   ✔ 2 converted   ♻ 0 repaired   ➜ 0 ready   • 1 skipped   ✘ 0 failed
 ```
+
+Use `-v` to list parser warnings (e.g. stripped incomplete SCE COMMENT trailers) in the summary.
 
 ## Output Status Codes
 
