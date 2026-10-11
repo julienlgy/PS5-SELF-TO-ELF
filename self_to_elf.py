@@ -308,6 +308,7 @@ def convert_file(path, max_size, dry_run):
 
 def check_full_decryption(paths):
     """Check if all SELF files were successfully converted (no encrypted/compressed segments)."""
+    checked = 0
     for path in paths:
         if path.suffix.lower() not in (".prx", ".bin"):
             continue
@@ -320,6 +321,7 @@ def check_full_decryption(paths):
                     data = stream.read()
                     # Check if it's a valid SELF that could be converted
                     if data[:4] in SELF_MAGICS and data[4:12] == bytes.fromhex("0001011201010000"):
+                        checked += 1
                         # Try to parse entries to see if any are encrypted/compressed
                         entry_count, = struct.unpack_from("<H", data, 24)
                         for i in range(entry_count):
@@ -330,6 +332,8 @@ def check_full_decryption(paths):
                                 return False, f"{path.name}: contains compressed segments"
         except Exception:
             pass
+    if not checked:
+        return False, "no SELF files found to decrypt"
     return True, "All SELF files fully decrypted and converted"
 
 
@@ -365,13 +369,12 @@ def main():
             status, message = "FAIL", str(error)
         totals[status] += 1
         print(f"{status}: {path}: {message}", file=sys.stderr if status == "FAIL" else sys.stdout)
-    
-        # Check if all SELF files were fully decrypted
-        fully_decrypted, decryption_msg = check_full_decryption(paths)
-        print(f"Converted={totals['OK']}; repaired={totals['REPAIRED']}; ready={totals['READY']}; "
-              f"skipped={totals['SKIP']}; failed={totals['FAIL']}")
-        print(f"Decryption status: {'OK - Full decryption' if fully_decrypted else 'PARTIAL - ' + decryption_msg}")
-        return 1 if totals["FAIL"] else 0
+
+    fully_decrypted, decryption_msg = check_full_decryption(paths)
+    print(f"Converted={totals['OK']}; repaired={totals['REPAIRED']}; ready={totals['READY']}; "
+          f"skipped={totals['SKIP']}; failed={totals['FAIL']}")
+    print(f"Decryption status: {'OK - Full decryption' if fully_decrypted else 'PARTIAL - ' + decryption_msg}")
+    return 1 if totals["FAIL"] else 0
 
 
 if __name__ == "__main__":
