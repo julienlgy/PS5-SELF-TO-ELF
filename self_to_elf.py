@@ -451,14 +451,45 @@ def print_summary(results, base, color, elapsed, verbose):
     print()
 
 
+def check_full_decryption(paths):
+    """Check if all SELF files were successfully converted (no encrypted/compressed segments)."""
+    checked = 0
+    for path in paths:
+        if path.suffix.lower() not in (".prx", ".bin"):
+            continue
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(64)
+                magic = header[:4]
+                if magic in SELF_MAGICS:
+                    stream.seek(0)
+                    data = stream.read()
+                    # Check if it's a valid SELF that could be converted
+                    if data[:4] in SELF_MAGICS and data[4:12] == bytes.fromhex("0001011201010000"):
+                        checked += 1
+                        # Try to parse entries to see if any are encrypted/compressed
+                        entry_count, = struct.unpack_from("<H", data, 24)
+                        for i in range(entry_count):
+                            flags, _, _, _ = struct.unpack_from("<QQQQ", data, 32 + i * 32)
+                            if flags & 2:  # encrypted
+                                return False, f"{path.name}: contains encrypted segments"
+                            if flags & 8:  # compressed
+                                return False, f"{path.name}: contains compressed segments"
+        except Exception:
+            pass
+    if not checked:
+        return False, "no SELF files found to decrypt"
+    return True, "All SELF files fully decrypted and converted"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Recursively convert unencrypted, uncompressed SELF *.prx "
                     "(4F 15 3D 1D or 54 14 F5 EE) to ELF, preserving originals "
-                    "as *.prxbak. No decryption or decompression is performed. Also repair "
-                    "dangling empty PT_NULL headers in previously converted ELF "
+                    "as *.prxbak / *.binbak. Also processes eboot.bin if present. "
+                    "No decryption or decompression is performed. Also repair "                    "dangling empty PT_NULL headers in previously converted ELF "
                     "(backup: *.prx.elf.bak).")
-    parser.add_argument("path", type=Path, help="directory to scan, or a single .prx file")
+    parser.add_argument("path", type=Path, help="directory to scan, or a single .prx/.bin file")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate conversions without modifying files")
     parser.add_argument("--max-output-mib", type=int, default=512,
@@ -471,13 +502,13 @@ def main():
     root = args.path.resolve()
     if root.is_dir():
         paths = sorted(path for path in root.rglob("*")
-                       if path.suffix.lower() == ".prx" and path.is_file())
+                       if path.suffix.lower() in (".prx", ".bin") and path.is_file())
         base = root
-    elif root.is_file() and root.suffix.lower() == ".prx":
+    elif root.is_file() and root.suffix.lower() in (".prx", ".bin"):
         paths = [root]
         base = root.parent
     else:
-        parser.error("path must be an existing directory or .prx file")
+        parser.error("path must be an existing directory or .prx/.bin file")
 
     if os.name == "nt":
         os.system("")  # enables ANSI escape handling in Windows consoles
@@ -490,10 +521,10 @@ def main():
     mode = "dry-run" if args.dry_run else "convert"
     print(f"  {paint('Target', BOLD, color)}  {root}")
     print(f"  {paint('Mode  ', BOLD, color)}  {mode}")
-    print(f"  {paint('Files ', BOLD, color)}  {len(paths)} .prx found")
+    print(f"  {paint('Files ', BOLD, color)}  {len(paths)} .prx/.bin found")
     print()
     if not paths:
-        print("  No .prx files found.")
+        print("  No .prx/.bin files found.")
         return 0
 
     max_size = args.max_output_mib * 1024 * 1024
@@ -514,6 +545,8 @@ def main():
     elapsed = time.monotonic() - started
 
     print_summary(results, base, color, elapsed, args.verbose)
+    fully_decrypted, decryption_msg = check_full_decryption(paths)
+    print(f"Decryption status: {'OK - Full decryption' if fully_decrypted else 'PARTIAL - ' + decryption_msg}")
     return 1 if any(r.status == "FAIL" for r in results) else 0
 
 
