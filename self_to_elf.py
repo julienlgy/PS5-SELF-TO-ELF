@@ -2,17 +2,55 @@
 """Convert raw SELF PRX files in place, preserving originals as .prx.bak."""
 
 import argparse
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import tempfile
+import time
 
 
 SELF_MAGIC = bytes.fromhex("4f153d1d")
 SELF_MAGICS = (SELF_MAGIC, bytes.fromhex("5414f5ee"))
 ELF_MAGIC = b"\x7fELF"
 DEFAULT_MAX_SIZE = 512 * 1024 * 1024
+
+RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+STYLES = {
+    "OK": ("\033[92m", "✔"),
+    "REPAIRED": ("\033[96m", "♻"),
+    "READY": ("\033[94m", "➜"),
+    "SKIP": ("\033[93m", "•"),
+    "FAIL": ("\033[91m", "✘"),
+}
+CYAN = "\033[96m"
+SELF_ART = [
+    "███████╗███████╗██╗     ███████╗",
+    "██╔════╝██╔════╝██║     ██╔════╝",
+    "███████╗█████╗  ██║     █████╗  ",
+    "╚════██║██╔══╝  ██║     ██╔══╝  ",
+    "███████║███████╗███████╗███████╗",
+    "╚══════╝╚══════╝╚══════╝╚══════╝",
+]
+ELF_ART = [
+    "███████╗██╗     ███████╗",
+    "██╔════╝██║     ██╔════╝",
+    "█████╗  ██║     █████╗  ",
+    "██╔══╝  ██║     ██╔══╝  ",
+    "███████╗███████╗███████╗",
+    "╚══════╝╚══════╝╚══════╝",
+]
+
+
+@dataclass
+class Result:
+    path: Path
+    status: str
+    size: int = 0
+    note: str = ""
+    notices: list = field(default_factory=list)
 
 
 def describe_format(header):
@@ -278,24 +316,23 @@ def convert_file(path, max_size, dry_run):
         header = stream.read(64)
         magic = header[:4]
         if magic != ELF_MAGIC and magic not in SELF_MAGICS:
-            return "SKIP", describe_format(header)
+            return Result(path, "SKIP", note=describe_format(header))
         stream.seek(0)
         data = stream.read()
     notices = []
     if magic == ELF_MAGIC:
         output = repair_empty_null_headers(data)
         if output is None:
-            return "SKIP", describe_format(header)
+            return Result(path, "SKIP", note=describe_format(header))
         backup = path.with_name(path.name + ".elf.bak")
-        action = "REPAIRED"
+        status = "REPAIRED"
     else:
         output = self_to_elf(data, max_size, notices)
         backup = path.with_name(path.name + ".bak")
-        action = "OK"
+        status = "OK"
     require(not os.path.lexists(backup), f"backup already exists: {backup}")
-    details = "; " + "; ".join(notices) if notices else ""
     if dry_run:
-        return "READY", f"{action}: ELF {len(output)} bytes; backup: {backup.name}{details}"
+        return Result(path, "READY", len(output), f"backup: {backup.name}", notices)
     current_stat = path.stat()
     require((original_stat.st_dev, original_stat.st_ino, original_stat.st_size,
              original_stat.st_mtime_ns) ==
@@ -303,7 +340,115 @@ def convert_file(path, max_size, dry_run):
              current_stat.st_mtime_ns),
             "source changed during conversion; refusing to replace it")
     replace_with_backup(path, output, backup)
-    return action, f"ELF {len(output)} bytes; original: {backup.name}{details}"
+    return Result(path, status, len(output), f"backup: {backup.name}", notices)
+
+
+def human_size(size):
+    if not size:
+        return "-"
+    for unit in ("B", "KiB", "MiB"):
+        if size < 1024:
+            return f"{size} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
+
+
+def clip(text, width):
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def paint(text, code, enabled):
+    return f"{code}{text}{RESET}" if enabled else text
+
+
+def print_banner(color):
+    print()
+    for i in range(len(SELF_ART)):
+        arrow = "   ══▶   " if i == 2 else "         "
+        line = SELF_ART[i] + arrow + ELF_ART[i]
+        print(paint("  " + line, BOLD + CYAN, color))
+    print(paint("  PS5 SELF/PRX → ELF converter", BOLD, color)
+          + paint("  ·  no decryption, no decompression", DIM, color))
+    print()
+
+
+def print_progress(done, total, name):
+    width = 30
+    filled = int(width * done / total)
+    columns = shutil.get_terminal_size((100, 20)).columns - 1
+    line = f"  {'█' * filled}{'░' * (width - filled)} {done}/{total}  {name}"[:columns]
+    sys.stdout.write("\r" + line.ljust(columns))
+    sys.stdout.flush()
+
+
+def clear_progress():
+    columns = shutil.get_terminal_size((100, 20)).columns - 1
+    sys.stdout.write("\r" + " " * columns + "\r")
+    sys.stdout.flush()
+
+
+def print_table(results, base, color):
+    headers = ["#", "STATUS", "FILE", "SIZE", "NOTE"]
+    files = [str(r.path.relative_to(base)) for r in results]
+    notes = [r.note for r in results]
+    file_width = min(max(len(headers[2]), *map(len, files)), 48)
+    note_width = min(max(len(headers[4]), *map(len, notes)), 46)
+    widths = [len(str(len(results))), 10, file_width, 10, note_width]
+
+    def rule(left, middle, right):
+        return "  " + left + middle.join("─" * (w + 2) for w in widths) + right
+
+    def row(cells, styled=None):
+        padded = [cell.ljust(width) for cell, width in zip(cells, widths)]
+        if styled is not None:
+            padded[1] = paint(padded[1], styled, color)
+        return "  │ " + " │ ".join(padded) + " │"
+
+    print(paint("  RESULTS", BOLD, color))
+    print(rule("┌", "┬", "┐"))
+    print(row(headers))
+    print(rule("├", "┼", "┤"))
+    for index, (result, name, note) in enumerate(zip(results, files, notes), 1):
+        style, icon = STYLES[result.status]
+        print(row([
+            str(index),
+            f"{icon} {result.status}",
+            clip(name, file_width),
+            human_size(result.size),
+            clip(note, note_width),
+        ], styled=style))
+    print(rule("└", "┴", "┘"))
+
+
+def print_summary(results, base, color, elapsed, verbose):
+    print()
+    print_table(results, base, color)
+    print()
+    counts = {status: sum(r.status == status for r in results) for status in STYLES}
+    labels = {"OK": "converted", "REPAIRED": "repaired", "READY": "ready",
+              "SKIP": "skipped", "FAIL": "failed"}
+    totals = "   ".join(paint(f"{STYLES[s][1]} {counts[s]} {labels[s]}", STYLES[s][0], color)
+                        for s in STYLES)
+    print(paint("  TOTALS", BOLD, color) + f"   {totals}")
+    print(paint(f"  Time: {elapsed:.2f} s", DIM, color))
+
+    failures = [r for r in results if r.status == "FAIL"]
+    if failures:
+        print()
+        print(paint(f"  FAILURES ({len(failures)})", BOLD + STYLES["FAIL"][0], color))
+        for r in failures:
+            print(f"    ✘ {r.path.relative_to(base)}: {r.note}")
+
+    warnings = [(r, notice) for r in results for notice in r.notices]
+    if warnings:
+        print()
+        print(paint(f"  WARNINGS ({len(warnings)})", BOLD + STYLES["SKIP"][0], color))
+        if verbose:
+            for r, notice in warnings:
+                print(f"    ! {r.path.relative_to(base)}: {notice}")
+        else:
+            print(paint("    Run with -v to list them.", DIM, color))
+    print()
 
 
 def main():
@@ -318,6 +463,8 @@ def main():
                         help="validate conversions without modifying files")
     parser.add_argument("--max-output-mib", type=int, default=512,
                         help="maximum reconstructed size per ELF (default: 512 MiB)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="list parser warnings in the summary")
     args = parser.parse_args()
     if args.max_output_mib <= 0:
         parser.error("--max-output-mib must be positive")
@@ -325,21 +472,49 @@ def main():
     if root.is_dir():
         paths = sorted(path for path in root.rglob("*")
                        if path.suffix.lower() == ".prx" and path.is_file())
+        base = root
     elif root.is_file() and root.suffix.lower() == ".prx":
         paths = [root]
+        base = root.parent
     else:
         parser.error("path must be an existing directory or .prx file")
-    totals = {"OK": 0, "REPAIRED": 0, "READY": 0, "SKIP": 0, "FAIL": 0}
-    for path in paths:
+
+    if os.name == "nt":
+        os.system("")  # enables ANSI escape handling in Windows consoles
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    interactive = sys.stdout.isatty()
+
+    print_banner(color)
+    mode = "dry-run" if args.dry_run else "convert"
+    print(f"  {paint('Target', BOLD, color)}  {root}")
+    print(f"  {paint('Mode  ', BOLD, color)}  {mode}")
+    print(f"  {paint('Files ', BOLD, color)}  {len(paths)} .prx found")
+    print()
+    if not paths:
+        print("  No .prx files found.")
+        return 0
+
+    max_size = args.max_output_mib * 1024 * 1024
+    results = []
+    started = time.monotonic()
+    for done, path in enumerate(paths, 1):
+        if interactive:
+            print_progress(done - 1, len(paths), path.name)
         try:
-            status, message = convert_file(path, args.max_output_mib * 1024 * 1024, args.dry_run)
+            result = convert_file(path, max_size, args.dry_run)
         except (OSError, ValueError) as error:
-            status, message = "FAIL", str(error)
-        totals[status] += 1
-        print(f"{status}: {path}: {message}", file=sys.stderr if status == "FAIL" else sys.stdout)
-    print(f"Converted={totals['OK']}; repaired={totals['REPAIRED']}; ready={totals['READY']}; "
-          f"skipped={totals['SKIP']}; failed={totals['FAIL']}")
-    return 1 if totals["FAIL"] else 0
+            result = Result(path, "FAIL", note=str(error))
+        results.append(result)
+        if interactive:
+            print_progress(done, len(paths), path.name)
+    if interactive:
+        clear_progress()
+    elapsed = time.monotonic() - started
+
+    print_summary(results, base, color, elapsed, args.verbose)
+    return 1 if any(r.status == "FAIL" for r in results) else 0
 
 
 if __name__ == "__main__":
