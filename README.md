@@ -1,6 +1,6 @@
 # PS5 SELF to ELF Converter
 
-A Python tool to convert **unencrypted, uncompressed** PS5 SELF (Signed Executable and Linkable Format) `.prx` files to standard ELF executables, preserving the originals as backups.
+A Python tool to convert **unencrypted, uncompressed** PS5 SELF (Signed Executable and Linkable Format) `.prx` and `.bin` (e.g., `eboot.bin`) files to standard ELF executables, preserving the originals as backups.
 
 ## Overview
 
@@ -9,15 +9,16 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - Parsing the SELF header and segment table
 - Mapping SELF payload segments to ELF program headers
 - Reconstructing a valid ELF64 x86-64 executable
-- Preserving the original file as a `.prx.bak` backup
+- Preserving the original file as a `.prx.bak` / `.bin.bak` backup
 
 **Important:** This tool does **not** decrypt encrypted SELF files or decompress compressed payloads. It only works on unencrypted, uncompressed SELF containers.
 
 ## Features
 
-- ✅ Converts SELF `.prx` files (magic `4F 15 3D 1D` or `54 14 F5 EE`) to ELF
+- ✅ Converts SELF `.prx` and `.bin` files (e.g., `eboot.bin`; magic `4F 15 3D 1D` or `54 14 F5 EE`) to ELF
 - ✅ Recursively processes directories
-- ✅ Preserves originals as `.prx.bak` backups
+- ✅ Preserves originals as `.prx.bak` / `.bin.bak` backups
+- ✅ Prints a final decryption status summary (full or partial)
 - ✅ Repairs dangling `PT_NULL` headers in previously converted ELF files (backup: `.prx.elf.bak`)
 - ✅ Validates output ELF structure
 - ✅ Dry-run mode for safe testing
@@ -39,11 +40,12 @@ No additional dependencies required — uses only Python standard library.
 ## Usage
 
 ```bash
-# Convert all .prx files in a directory (recursive)
+# Convert all .prx and .bin files in a directory (recursive)
 python self_to_elf.py /path/to/ps5/game/directory
 
-# Convert a single .prx file
+# Convert a single .prx or .bin file (e.g., eboot.bin)
 python self_to_elf.py /path/to/file.prx
+python self_to_elf.py /path/to/eboot.bin
 
 # Dry run (validate without modifying files)
 python self_to_elf.py /path/to/directory --dry-run
