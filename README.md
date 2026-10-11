@@ -102,6 +102,19 @@ Use `-v` to list parser warnings (e.g. stripped incomplete SCE COMMENT trailers)
 6. **Validation** — Verifies output is a valid ELF64 x86-64 executable
 7. **Backup** — Creates hard-link backup before atomic replacement
 
+## Project layout
+
+`self_to_elf.py` is the command-line entry point. The implementation lives in the `ps5_self_to_elf/` package:
+
+- `constants.py`: magic numbers and default limits
+- `checks.py`: bounds and overlap helpers
+- `formats.py`: file format detection
+- `self_parser.py`: SELF parsing and ELF reconstruction
+- `elf.py`: ELF validation and header repair
+- `converter.py`: per-file conversion, backup, and result records
+- `report.py`: terminal banner, progress, and tables
+- `cli.py`: argument parsing and `main()`
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
