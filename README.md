@@ -9,7 +9,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - Parsing the SELF header and segment table
 - Mapping SELF payload segments to ELF program headers
 - Reconstructing a valid ELF64 x86-64 executable
-- Preserving the original file as a `.prx.bak` / `.bin.bak` backup
+- Preserving the original file as a `.prxbak` / `.binbak` backup
 
 **Important:** This tool does **not** decrypt encrypted SELF files or decompress compressed payloads. It only works on unencrypted, uncompressed SELF containers.
 
@@ -17,7 +17,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 
 - ✅ Converts SELF `.prx` and `.bin` files (e.g., `eboot.bin`; magic `4F 15 3D 1D` or `54 14 F5 EE`) to ELF
 - ✅ Recursively processes directories
-- ✅ Preserves originals as `.prx.bak` / `.bin.bak` backups
+- ✅ Preserves originals as `.prxbak` / `.binbak` backups
 - ✅ Prints a final decryption status summary (full or partial)
 - ✅ Repairs dangling `PT_NULL` headers in previously converted ELF files (backup: `.prx.elf.bak`)
 - ✅ Validates output ELF structure
@@ -65,8 +65,8 @@ $ python self_to_elf.py ./app0/
   ┌───┬────────────┬──────────────────────┬────────────┬───────────────────────────────┐
   │ # │ STATUS     │ FILE                 │ SIZE       │ NOTE                          │
   ├───┼────────────┼──────────────────────┼────────────┼───────────────────────────────┤
-  │ 1 │ ✔ OK       │ eboot.prx            │ 2.3 MiB    │ backup: eboot.prx.bak         │
-  │ 2 │ ✔ OK       │ libSceSysmodule.prx  │ 100.0 KiB  │ backup: libSceSysmodule.prx.bak │
+  │ 1 │ ✔ OK       │ eboot.prx            │ 2.3 MiB    │ backup: eboot.prxbak          │
+  │ 2 │ ✔ OK       │ libSceSysmodule.prx  │ 100.0 KiB  │ backup: libSceSysmodule.prxbak │
   │ 3 │ • SKIP     │ data.prx             │ -          │ unrecognized format; ...      │
   └───┴────────────┴──────────────────────┴────────────┴───────────────────────────────┘
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert raw SELF PRX files in place, preserving originals as .prx.bak."""
+"""Convert raw SELF PRX files in place, preserving originals as .prxbak."""
 
 import argparse
 from dataclasses import dataclass, field
@@ -328,7 +328,7 @@ def convert_file(path, max_size, dry_run):
         status = "REPAIRED"
     else:
         output = self_to_elf(data, max_size, notices)
-        backup = path.with_name(path.name + ".bak")
+        backup = path.with_name(path.name + "bak")
         status = "OK"
     require(not os.path.lexists(backup), f"backup already exists: {backup}")
     if dry_run:
@@ -486,9 +486,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Recursively convert unencrypted, uncompressed SELF *.prx "
                     "(4F 15 3D 1D or 54 14 F5 EE) to ELF, preserving originals "
-                    "as *.prx.bak. Also processes eboot.bin if present. "
-                    "No decryption or decompression is performed. Also repair "
-                    "dangling empty PT_NULL headers in previously converted ELF "
+                    "as *.prxbak / *.binbak. Also processes eboot.bin if present. "
+                    "No decryption or decompression is performed. Also repair "                    "dangling empty PT_NULL headers in previously converted ELF "
                     "(backup: *.prx.elf.bak).")
     parser.add_argument("path", type=Path, help="directory to scan, or a single .prx/.bin file")
     parser.add_argument("--dry-run", action="store_true",
