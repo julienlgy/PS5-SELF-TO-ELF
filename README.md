@@ -9,7 +9,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - Parsing the SELF header and segment table
 - Mapping SELF payload segments to ELF program headers
 - Reconstructing a valid ELF64 x86-64 executable
-- Preserving the original file as a `.prx.bak` backup
+- Preserving the original file as a `.prxbak` backup
 
 **Important:** This tool does **not** decrypt encrypted SELF files or decompress compressed payloads. It only works on unencrypted, uncompressed SELF containers.
 
@@ -17,7 +17,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 
 - ✅ Converts SELF `.prx` files (magic `4F 15 3D 1D` or `54 14 F5 EE`) to ELF
 - ✅ Recursively processes directories
-- ✅ Preserves originals as `.prx.bak` backups
+- ✅ Preserves originals as `.prxbak` backups
 - ✅ Repairs dangling `PT_NULL` headers in previously converted ELF files (backup: `.prx.elf.bak`)
 - ✅ Validates output ELF structure
 - ✅ Dry-run mode for safe testing
@@ -56,8 +56,8 @@ python self_to_elf.py /path/to/directory --max-output-mib 1024
 
 ```bash
 $ python self_to_elf.py ./app0/
-OK: ./app0/eboot.prx: ELF 2457600 bytes; original: eboot.prx.bak
-OK: ./app0/libSceSysmodule.prx: ELF 102400 bytes; original: libSceSysmodule.prx.bak
+OK: ./app0/eboot.prx: ELF 2457600 bytes; original: eboot.prxbak
+OK: ./app0/libSceSysmodule.prx: ELF 102400 bytes; original: libSceSysmodule.prxbak
 SKIP: ./app0/data.bin: unrecognized format; header: 00 00 00 00 ...
 Converted=2; repaired=0; ready=0; skipped=1; failed=0
 ```
