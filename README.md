@@ -18,7 +18,8 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - ✅ Converts SELF `.prx` and `.bin` files (e.g., `eboot.bin`; magic `4F 15 3D 1D` or `54 14 F5 EE`) to ELF
 - ✅ Recursively processes directories
 - ✅ Preserves originals as `.prxbak` / `.binbak` backups
-- ✅ Prints a final decryption status summary (full or partial)
+- ✅ Prints a final conversion summary with per-file failures
+- ✅ Accepts missing final 16-byte alignment padding in dumped SELF files, without accepting truncated payloads
 - ✅ Repairs dangling `PT_NULL` headers in previously converted ELF files (backup: `.prx.elf.bak`)
 - ✅ Validates output ELF structure
 - ✅ Dry-run mode for safe testing
@@ -74,6 +75,25 @@ $ python self_to_elf.py ./app0/
 ```
 
 Use `-v` to list parser warnings (e.g. stripped incomplete SCE COMMENT trailers) in the summary.
+
+Dumped SELF files can omit up to 15 bytes of final alignment padding while
+retaining a rounded-up size in their header. These files are accepted only when
+every declared segment is present; missing payload bytes are still rejected.
+The embedded ELF header alone does not mean the payload is decrypted.
+
+Directory scans include backup directories such as `_original_files`. If those
+contain encrypted originals, they will fail independently of the unencrypted
+dumps. To process only the active Sifu files on Windows, target them separately:
+
+```powershell
+python self_to_elf.py "C:\ps5\games\sifu\app0\eboot.bin" --dry-run -v
+python self_to_elf.py "C:\ps5\games\sifu\app0\prx" --dry-run -v
+python self_to_elf.py "C:\ps5\games\sifu\app0\sce_module" --dry-run -v
+```
+
+Remove `--dry-run` to replace these files with reconstructed ELF files and
+preserve the SELF originals as `.binbak` / `.prxbak` backups. No decryption is
+performed, and a nonzero exit code indicates at least one conversion failed.
 
 ## Output Status Codes
 
