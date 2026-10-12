@@ -113,7 +113,11 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
     entry_count, = struct.unpack_from("<H", data, 24)
     elf_offset = 32 + entry_count * 32
     payload_start = header_size + metadata_size
-    require(payload_start <= self_size <= len(data), "invalid SELF size/metadata")
+    missing_padding = self_size - len(data)
+    require(payload_start <= min(self_size, len(data)) and (
+        missing_padding <= 0 or
+        (missing_padding < 16 and self_size % 16 == 0)),
+        "invalid SELF size/metadata")
     require(entry_count > 0 and fits(32, entry_count * 32, header_size),
             "invalid SELF segment table")
     require(fits(elf_offset, 64, header_size), "truncated embedded ELF header")
@@ -155,7 +159,8 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
         require(flags >> 32 == 0 and (
             digest or attributes == 4 or attributes & ~0xf000 == 0x804),
             f"{name}: unsupported flags {flags:#x}")
-        require(source >= payload_start and fits(source, stored_size, self_size),
+        require(source >= payload_start
+                and fits(source, stored_size, min(self_size, len(data))),
                 f"{name}: payload outside SELF")
         require(stored_size == unpacked_size, f"{name}: inconsistent raw size")
         require(not any(overlaps((source, stored_size), previous) for previous in sources),
@@ -177,9 +182,12 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
                 f"{name}: overlapping ELF payload")
         copies.append((destination, size, source))
 
+    if missing_padding > 0 and notices is not None:
+        notices.append(f"accepted missing final SELF alignment padding ({missing_padding} bytes)")
+
     # Some dumped containers append a complete SCE COMMENT after selfSize.
     tail_size = len(data) - self_size
-    if tail_size:
+    if tail_size > 0:
         candidates = [i for i, header in enumerate(headers)
                       if header[0] == 0x6fffff01 and i not in assigned]
         require(len(candidates) == 1,
@@ -451,37 +459,6 @@ def print_summary(results, base, color, elapsed, verbose):
     print()
 
 
-def check_full_decryption(paths):
-    """Check if all SELF files were successfully converted (no encrypted/compressed segments)."""
-    checked = 0
-    for path in paths:
-        if path.suffix.lower() not in (".prx", ".bin"):
-            continue
-        try:
-            with path.open("rb") as stream:
-                header = stream.read(64)
-                magic = header[:4]
-                if magic in SELF_MAGICS:
-                    stream.seek(0)
-                    data = stream.read()
-                    # Check if it's a valid SELF that could be converted
-                    if data[:4] in SELF_MAGICS and data[4:12] == bytes.fromhex("0001011201010000"):
-                        checked += 1
-                        # Try to parse entries to see if any are encrypted/compressed
-                        entry_count, = struct.unpack_from("<H", data, 24)
-                        for i in range(entry_count):
-                            flags, _, _, _ = struct.unpack_from("<QQQQ", data, 32 + i * 32)
-                            if flags & 2:  # encrypted
-                                return False, f"{path.name}: contains encrypted segments"
-                            if flags & 8:  # compressed
-                                return False, f"{path.name}: contains compressed segments"
-        except Exception:
-            pass
-    if not checked:
-        return False, "no SELF files found to decrypt"
-    return True, "All SELF files fully decrypted and converted"
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Recursively convert unencrypted, uncompressed SELF *.prx "
@@ -545,8 +522,6 @@ def main():
     elapsed = time.monotonic() - started
 
     print_summary(results, base, color, elapsed, args.verbose)
-    fully_decrypted, decryption_msg = check_full_decryption(paths)
-    print(f"Decryption status: {'OK - Full decryption' if fully_decrypted else 'PARTIAL - ' + decryption_msg}")
     return 1 if any(r.status == "FAIL" for r in results) else 0
 
 
