@@ -20,7 +20,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - ✅ Preserves originals as `.prxbak` / `.binbak` backups
 - ✅ Prints a final conversion summary with per-file failures
 - ✅ Accepts missing final 16-byte alignment padding in dumped SELF files, without accepting truncated payloads
-- ✅ Repairs dangling `PT_NULL` headers in previously converted ELF files (backup: `.prx.elf.bak`)
+- ✅ Repairs existing ELF dumps (`REPAIRED`, backup: `.prx.elf.bak` / `.bin.elf.bak`): strips invalid or truncated section tables, strips truncated optional non-loadable metadata segments (`PT_SCE_DYNLIBDATA`, `PT_SCE_COMMENT`, non-alloc `PT_NOTE`), zeroes dirty `PT_NULL` entries, and resets out-of-range offsets on empty (`p_filesz == 0`) segments
 - ✅ Validates output ELF structure
 - ✅ Dry-run mode for safe testing
 - ✅ Configurable output size limit (default: 512 MiB)
@@ -95,12 +95,36 @@ Remove `--dry-run` to replace these files with reconstructed ELF files and
 preserve the SELF originals as `.binbak` / `.prxbak` backups. No decryption is
 performed, and a nonzero exit code indicates at least one conversion failed.
 
+### Repair an ELF with a missing section table or truncated metadata
+
+Some ELF dumps retain an `e_shoff` pointing beyond the end of the file, a
+section table referencing truncated debug sections, empty runtime segments
+(`p_filesz == 0`) with out-of-range offsets, residual fields in `PT_NULL`
+entries, or truncated non-loadable trailer segments (`PT_SCE_COMMENT`,
+`PT_SCE_DYNLIBDATA`, non-alloc `PT_NOTE`). Existing ELF inputs are checked and
+repaired in place without padding the file or inventing missing payloads.
+Valid section tables are preserved, and invalid runtime (`PT_LOAD` / `PT_DYNAMIC`)
+segments still cause failure.
+
+```powershell
+python self_to_elf.py "C:\ps5\game\prx\eawk_EAWebKitDLL.prx" --dry-run -v
+python self_to_elf.py "C:\ps5\game\prx\eawk_EAWebKitDLL.prx" -v
+```
+
+Run this on the ELF **before relinking**, not on a Windows DLL (magic `MZ`),
+which is skipped. Repairs preserve the original as `eawk_EAWebKitDLL.prx.elf.bak`.
+A stripped ELF has no section table; downstream tools must read dynamic imports
+and exports from program headers / dynamic metadata if they need them.
+This repair addresses malformed ELF metadata, not unresolved imports or runtime
+calls through null pointers. Do not simply suppress an audit parser error:
+silently skipping a module can make the dependency report incomplete.
+
 ## Output Status Codes
 
 | Status | Meaning |
 |--------|---------|
 | `OK` | Successfully converted SELF to ELF |
-| `REPAIRED` | Fixed dangling PT_NULL headers in existing ELF |
+| `REPAIRED` | Fixed invalid section-table metadata or dangling PT_NULL headers in existing ELF |
 | `READY` | Dry-run: conversion would succeed |
 | `SKIP` | Not a SELF file or already valid ELF |
 | `FAIL` | Conversion error (encrypted, compressed, corrupt, etc.) |
