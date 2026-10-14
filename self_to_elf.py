@@ -213,8 +213,7 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
         kind, flags, offset, address, _, size, memory_size, _ = header
         if kind == 0 or size == 0 or covered(offset, size, copies):
             continue
-        optional = flags == 0 and address == 0 and (
-            (kind == 4 and memory_size == 0) or kind in (0x6fffff00, 0x6fffff01))
+        optional = is_optional_metadata_segment(kind, flags, address, memory_size)
         require(optional and not any(overlaps((offset, size), (start, length))
                                     for start, length, _ in copies),
                 f"missing payload for program header {i}")
@@ -243,6 +242,55 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
     return output
 
 
+def is_optional_metadata_segment(kind, flags, address, memory_size):
+    return flags == 0 and address == 0 and (
+        (kind == 4 and memory_size == 0) or kind in (0x6fffff00, 0x6fffff01))
+
+
+def section_table_error(data, ph_offset=64, ph_count=0):
+    """Check section-table metadata and entries, including extended numbering."""
+    offset, = struct.unpack_from("<Q", data, 40)
+    entry_size, count, names = struct.unpack_from("<HHH", data, 58)
+    if offset == 0:
+        return "section counts without a section table" if count or names else None
+    if entry_size != 64:
+        return "invalid ELF section-header entry size"
+    if offset < 64 or not fits(offset, entry_size, len(data)):
+        return f"section header table at {offset:#x} is truncated"
+    if count == 0:
+        count, = struct.unpack_from("<Q", data, offset + 32)
+        if count == 0 or count >= (1 << 32):
+            return "invalid extended ELF section count"
+    table_size = count * entry_size
+    if not fits(offset, table_size, len(data)):
+        return f"section header table at {offset:#x} is truncated"
+    if overlaps((offset, table_size), (ph_offset, ph_count * 56)):
+        return "ELF section-header table overlaps program-header table"
+    if names == 0xffff:
+        names, = struct.unpack_from("<I", data, offset + 40)
+    if names >= count:
+        return "ELF section-name table index outside section table"
+    sh0_type, = struct.unpack_from("<I", data, offset + 4)
+    if sh0_type != 0:
+        return "ELF section 0 is not SHT_NULL"
+    strtab_offset = strtab_size = 0
+    if names != 0:
+        _, sh_type, _, _, strtab_offset, strtab_size = struct.unpack_from(
+            "<IIQQQQ", data, offset + names * entry_size)
+        if (sh_type != 3 or strtab_size == 0
+                or not fits(strtab_offset, strtab_size, len(data))
+                or data[strtab_offset + strtab_size - 1] != 0):
+            return "ELF section-name string table is invalid or truncated"
+    for i in range(1, count):
+        sh_name, sh_type, _, _, sh_offset, sh_size = struct.unpack_from(
+            "<IIQQQQ", data, offset + i * entry_size)
+        if names != 0 and sh_name >= strtab_size:
+            return f"ELF section {i}: name offset outside string table"
+        if sh_type not in (0, 8) and not fits(sh_offset, sh_size, len(data)):
+            return f"ELF section {i} at {sh_offset:#x} is truncated"
+    return None
+
+
 def validate_elf(data):
     require(len(data) >= 64 and data[:7] == ELF_MAGIC + b"\x02\x01\x01",
             "expected little-endian ELF64")
@@ -255,8 +303,13 @@ def validate_elf(data):
             "invalid ELF program-header table")
     loads = []
     for i in range(ph_count):
+        position = ph_offset + i * ph_size
+        raw = data[position:position + ph_size]
         kind, flags, offset, address, _, size, memory_size, alignment = struct.unpack_from(
-            "<IIQQQQQQ", data, ph_offset + i * ph_size)
+            "<IIQQQQQQ", raw)
+        if kind == 0:
+            require(raw == bytes(ph_size), f"ELF program header {i}: non-zero PT_NULL entry")
+            continue
         require(fits(offset, size, len(data)), f"ELF program header {i}: payload outside file")
         if kind != 1:
             continue
@@ -270,26 +323,57 @@ def validate_elf(data):
         require(not any(overlaps((address, memory_size), previous) for previous in loads),
                 f"ELF program header {i}: overlapping load memory")
         loads.append((address, memory_size))
+    error = section_table_error(data, ph_offset, ph_count)
+    require(error is None, error)
 
 
-def repair_empty_null_headers(data):
-    """Repair dangling PT_NULL offsets left by earlier versions of this tool."""
+def repair_elf_headers(data, notices=None):
+    """Repair invalid section tables, truncated optional metadata, and dangling program headers."""
     if len(data) < 64 or data[:7] != ELF_MAGIC + b"\x02\x01\x01":
         return None
-    ph_offset, = struct.unpack_from("<Q", data, 32)
-    ph_size, ph_count = struct.unpack_from("<HH", data, 54)
-    require(ph_size == 56 and fits(ph_offset, ph_count * ph_size, len(data)),
+    elf = struct.unpack_from("<16sHHIQQQIHHHHHH", data)
+    require(elf[2] == 62 and elf[3] == 1 and elf[8] == 64,
+            "expected ELF64 x86-64")
+    ph_offset, ph_size, ph_count = elf[5], elf[9], elf[10]
+    require(ph_size == 56 and ph_offset >= 64 and 0 < ph_count < 0xffff
+            and fits(ph_offset, ph_count * ph_size, len(data)),
             "invalid ELF program-header table")
     output = None
     for i in range(ph_count):
         position = ph_offset + i * ph_size
+        raw = data[position:position + ph_size]
         kind, flags, offset, address, _, size, memory_size, _ = struct.unpack_from(
-            "<IIQQQQQQ", data, position)
-        if (kind == 0 and flags == 0 and address == 0 and size == 0
-                and memory_size == 0 and offset > len(data)):
+            "<IIQQQQQQ", raw)
+        if kind == 0:
+            if raw != bytes(ph_size):
+                if output is None:
+                    output = bytearray(data)
+                output[position:position + ph_size] = bytes(ph_size)
+                if notices is not None:
+                    notices.append(f"cleared non-zero PT_NULL program header {i}")
+        elif size == 0 and offset > len(data):
+            if output is None:
+                output = bytearray(data)
+            struct.pack_into("<Q", output, position + 8, 0)
+            if notices is not None:
+                notices.append(
+                    f"reset out-of-range offset {offset:#x} on empty program header {i}")
+        elif not fits(offset, size, len(data)) and is_optional_metadata_segment(
+                kind, flags, address, memory_size):
             if output is None:
                 output = bytearray(data)
             output[position:position + ph_size] = bytes(ph_size)
+            if notices is not None:
+                notices.append(
+                    f"stripped truncated optional program header {i} ({kind:#x} at {offset:#x})")
+    error = section_table_error(data, ph_offset, ph_count)
+    if error is not None:
+        if output is None:
+            output = bytearray(data)
+        struct.pack_into("<Q", output, 40, 0)
+        struct.pack_into("<HHH", output, 58, 0, 0, 0)
+        if notices is not None:
+            notices.append(f"stripped invalid section-table metadata: {error}")
     if output is not None:
         validate_elf(output)
     return output
@@ -329,8 +413,9 @@ def convert_file(path, max_size, dry_run):
         data = stream.read()
     notices = []
     if magic == ELF_MAGIC:
-        output = repair_empty_null_headers(data)
+        output = repair_elf_headers(data, notices)
         if output is None:
+            validate_elf(data)
             return Result(path, "SKIP", note=describe_format(header))
         backup = path.with_name(path.name + ".elf.bak")
         status = "REPAIRED"
@@ -464,7 +549,9 @@ def main():
         description="Recursively convert unencrypted, uncompressed SELF *.prx "
                     "(4F 15 3D 1D or 54 14 F5 EE) to ELF, preserving originals "
                     "as *.prxbak / *.binbak. Also processes eboot.bin if present. "
-                    "No decryption or decompression is performed. Also repair "                    "dangling empty PT_NULL headers in previously converted ELF "
+                    "No decryption or decompression is performed. Also repair "
+                    "invalid section-table metadata and dangling empty PT_NULL "
+                    "headers in existing ELF "
                     "(backup: *.prx.elf.bak).")
     parser.add_argument("path", type=Path, help="directory to scan, or a single .prx/.bin file")
     parser.add_argument("--dry-run", action="store_true",
