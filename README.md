@@ -20,7 +20,7 @@ The PlayStation 5 uses SELF containers to package executables. This tool reconst
 - ✅ Preserves originals as `.prxbak` / `.binbak` backups
 - ✅ Prints a final conversion summary with per-file failures
 - ✅ Accepts missing final 16-byte alignment padding in dumped SELF files, without accepting truncated payloads
-- ✅ Repairs existing ELF dumps (`REPAIRED`, backup: `.prx.elf.bak` / `.bin.elf.bak`): strips invalid or truncated section tables, strips truncated optional non-loadable metadata segments (`PT_SCE_DYNLIBDATA`, `PT_SCE_COMMENT`, non-alloc `PT_NOTE`), zeroes dirty `PT_NULL` entries, and resets out-of-range offsets on empty (`p_filesz == 0`) segments
+- ✅ Repairs existing ELF dumps in place (`REPAIRED`): strips invalid or truncated section tables, strips truncated optional non-loadable metadata segments (`PT_SCE_DYNLIBDATA`, `PT_SCE_COMMENT`, non-alloc `PT_NOTE`), zeroes dirty `PT_NULL` entries, and resets out-of-range offsets on empty (`p_filesz == 0`) segments without leaving duplicate ELF backup files in module directories
 - ✅ Validates output ELF structure
 - ✅ Dry-run mode for safe testing
 - ✅ Configurable output size limit (default: 512 MiB)
@@ -112,7 +112,9 @@ python self_to_elf.py "C:\ps5\game\prx\eawk_EAWebKitDLL.prx" -v
 ```
 
 Run this on the ELF **before relinking**, not on a Windows DLL (magic `MZ`),
-which is skipped. Repairs preserve the original as `eawk_EAWebKitDLL.prx.elf.bak`.
+which is skipped. Repairs modify only ELF header metadata in place so no extra
+ELF backup file is left inside `sce_module` or `prx` (which would cause
+`relinker.exe` to see duplicate `DT_SONAME` modules).
 A stripped ELF has no section table; downstream tools must read dynamic imports
 and exports from program headers / dynamic metadata if they need them.
 This repair addresses malformed ELF metadata, not unresolved imports or runtime
