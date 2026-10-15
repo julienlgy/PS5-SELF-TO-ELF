@@ -164,20 +164,20 @@ class ElfRepairTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<Q", output, 40)[0], 0)
         self.assertEqual(output[58:64], bytes(6))
 
-    def test_file_repair_backup_dry_run_and_repeat(self):
+    def test_file_repair_in_place_dry_run_and_repeat(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "module.prx"
             data = missing_sections(make_elf())
             path.write_bytes(data)
-            backup = path.with_name(path.name + ".elf.bak")
             result = convert_file(path, 512 * 1024 * 1024, True)
             self.assertEqual(result.status, "READY")
             self.assertEqual(path.read_bytes(), data)
-            self.assertFalse(backup.exists())
+            self.assertEqual([p.name for p in Path(directory).iterdir()], ["module.prx"])
             result = convert_file(path, 512 * 1024 * 1024, False)
             self.assertEqual(result.status, "REPAIRED")
-            self.assertEqual(backup.read_bytes(), data)
             self.assertEqual(path.read_bytes(), make_elf())
+            # No extra ELF backup file is created in the directory.
+            self.assertEqual([p.name for p in Path(directory).iterdir()], ["module.prx"])
             self.assertEqual(convert_file(path, 512 * 1024 * 1024, False).status, "SKIP")
 
     def test_invalid_existing_elf_fails_instead_of_skip(self):
@@ -189,14 +189,20 @@ class ElfRepairTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "payload outside file"):
                 convert_file(path, 512 * 1024 * 1024, False)
             self.assertEqual(path.read_bytes(), data)
-            self.assertFalse(path.with_name(path.name + ".elf.bak").exists())
+            self.assertEqual([p.name for p in Path(directory).iterdir()], ["module.prx"])
 
-    def test_existing_backup_is_never_overwritten(self):
+    def test_self_backup_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "module.prx"
-            data = missing_sections(make_elf())
+            elf = make_elf()
+            data = bytearray(384)
+            data[:12] = SELF_MAGIC + bytes.fromhex("0001011201010000")
+            struct.pack_into("<HHQH", data, 12, 256, 0, len(data), 1)
+            struct.pack_into("<QQQQ", data, 32, 4, 256, 128, 128)
+            data[64:184] = elf[:120]
+            data[256:] = elf[128:]
             path.write_bytes(data)
-            backup = path.with_name(path.name + ".elf.bak")
+            backup = path.with_name(path.name + "bak")
             backup.write_bytes(b"original backup")
             with self.assertRaisesRegex(ValueError, "backup already exists"):
                 convert_file(path, 512 * 1024 * 1024, False)

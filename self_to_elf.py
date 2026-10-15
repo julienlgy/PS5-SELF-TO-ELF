@@ -379,6 +379,21 @@ def repair_elf_headers(data, notices=None):
     return output
 
 
+def replace_in_place(path, output):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(output)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def replace_with_backup(path, output, backup):
     require(not os.path.lexists(backup), f"backup already exists: {backup}")
     temporary = None
@@ -417,23 +432,28 @@ def convert_file(path, max_size, dry_run):
         if output is None:
             validate_elf(data)
             return Result(path, "SKIP", note=describe_format(header))
-        backup = path.with_name(path.name + ".elf.bak")
+        backup = None
+        note = "in-place ELF header repair"
         status = "REPAIRED"
     else:
         output = self_to_elf(data, max_size, notices)
         backup = path.with_name(path.name + "bak")
+        require(not os.path.lexists(backup), f"backup already exists: {backup}")
+        note = f"backup: {backup.name}"
         status = "OK"
-    require(not os.path.lexists(backup), f"backup already exists: {backup}")
     if dry_run:
-        return Result(path, "READY", len(output), f"backup: {backup.name}", notices)
+        return Result(path, "READY", len(output), note, notices)
     current_stat = path.stat()
     require((original_stat.st_dev, original_stat.st_ino, original_stat.st_size,
              original_stat.st_mtime_ns) ==
             (current_stat.st_dev, current_stat.st_ino, current_stat.st_size,
              current_stat.st_mtime_ns),
             "source changed during conversion; refusing to replace it")
-    replace_with_backup(path, output, backup)
-    return Result(path, status, len(output), f"backup: {backup.name}", notices)
+    if backup is None:
+        replace_in_place(path, output)
+    else:
+        replace_with_backup(path, output, backup)
+    return Result(path, status, len(output), note, notices)
 
 
 def human_size(size):
@@ -551,8 +571,7 @@ def main():
                     "as *.prxbak / *.binbak. Also processes eboot.bin if present. "
                     "No decryption or decompression is performed. Also repair "
                     "invalid section-table metadata and dangling empty PT_NULL "
-                    "headers in existing ELF "
-                    "(backup: *.prx.elf.bak).")
+                    "headers in existing ELF in place.")
     parser.add_argument("path", type=Path, help="directory to scan, or a single .prx/.bin file")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate conversions without modifying files")
