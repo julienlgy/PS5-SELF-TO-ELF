@@ -88,6 +88,22 @@ def overlaps(first, second):
     return size != 0 and length != 0 and offset < other + length and other < offset + size
 
 
+def compatible_copy(data, destination, size, source, copies):
+    for start, length, existing in copies:
+        if not overlaps((destination, size), (start, length)):
+            continue
+        overlap_start = max(destination, start)
+        overlap_end = min(destination + size, start + length)
+        overlap_size = overlap_end - overlap_start
+        new_slice = data[source + (overlap_start - destination):
+                         source + (overlap_start - destination) + overlap_size]
+        old_slice = data[existing + (overlap_start - start):
+                         existing + (overlap_start - start) + overlap_size]
+        if new_slice != old_slice:
+            return False
+    return True
+
+
 def covered(offset, size, copies):
     end = offset + size
     while offset < end:
@@ -123,7 +139,7 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
     require(fits(elf_offset, 64, header_size), "truncated embedded ELF header")
     elf = struct.unpack_from("<16sHHIQQQIHHHHHH", data, elf_offset)
     require(elf[0][:7] == ELF_MAGIC + b"\x02\x01\x01"
-            and elf[2] == 62 and elf[3] == 1 and elf[8] == 64,
+            and elf[1] != 0 and elf[2] == 62 and elf[3] == 1 and elf[8] == 64,
             "expected little-endian ELF64 x86-64")
     ph_offset, ph_size, ph_count = elf[5], elf[9], elf[10]
     require(ph_size == 56 and 0 < ph_count < 0xffff and ph_offset >= 64
@@ -142,33 +158,48 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
                 f"program header {i}: range overflow")
         require(kind != 1 or size <= memory_size,
                 f"program header {i}: load payload exceeds memory size")
+        if kind != 0 and (kind == 1 or memory_size > 0 or address != 0):
+            require(fits(offset, size, max_size),
+                    f"program header {i}: exceeds output size limit")
 
     entries = [
         struct.unpack_from("<QQQQ", data, 32 + i * 32)
         for i in range(entry_count)
     ]
+    data_ph_indices = {
+        (flags >> 20) & 0xfff
+        for flags, _, _, _ in entries
+        if not (flags & 0x30000)
+    }
     copies = [(0, elf_header_size, elf_offset)]
     sources = []
     assigned = set()
+    limit = min(self_size, len(data))
     for i, (flags, source, stored_size, unpacked_size) in enumerate(entries):
         name = f"segment {i}"
         require(not flags & 2, f"{name}: encrypted; no decryption is performed")
         require(not flags & 8, f"{name}: compressed; provide an uncompressed SELF")
         attributes = flags & 0xfffff
-        digest = attributes == 0x10004
-        require(flags >> 32 == 0 and (
-            digest or attributes == 4 or attributes & ~0xf000 == 0x804),
-            f"{name}: unsupported flags {flags:#x}")
-        require(source >= payload_start
-                and fits(source, stored_size, min(self_size, len(data))),
-                f"{name}: payload outside SELF")
+        meta = bool(attributes & 0x30000)
+        blocked = bool(attributes & 0x800)
+        require(flags >> 32 == 0 and attributes & ~0x3f805 == 0
+                and (blocked or attributes & 0xf000 == 0)
+                and not (meta and blocked),
+                f"{name}: unsupported flags {flags:#x}")
         require(stored_size == unpacked_size, f"{name}: inconsistent raw size")
+        min_source = header_size if meta else payload_start
+        require((stored_size == 0 and source <= limit)
+                or (stored_size > 0 and source >= min_source
+                    and fits(source, stored_size, limit)),
+                f"{name}: payload outside SELF")
         require(not any(overlaps((source, stored_size), previous) for previous in sources),
                 f"{name}: overlapping SELF payload")
         sources.append((source, stored_size))
         index = (flags >> 20) & 0xfff
-        if digest:
-            require(index < entry_count and not entries[index][0] & 0x10000,
+        if meta:
+            valid_entry_target = index < entry_count and not (entries[index][0] & 0x30000)
+            valid_ph_target = index < ph_count and index in data_ph_indices
+            require(valid_entry_target or valid_ph_target,
                     f"{name}: invalid digest target")
             continue
         require(index < ph_count and index not in assigned,
@@ -177,36 +208,58 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
         destination, size = headers[index][2], headers[index][5]
         require(size == unpacked_size, f"{name}: size differs from ELF header")
         require(fits(destination, size, max_size), f"{name}: exceeds output size limit")
-        require(not any(overlaps((destination, size), (start, length))
-                        for start, length, _ in copies),
+        require(compatible_copy(data, destination, size, source, copies),
                 f"{name}: overlapping ELF payload")
-        copies.append((destination, size, source))
+        if size > 0:
+            copies.append((destination, size, source))
 
     if missing_padding > 0 and notices is not None:
         notices.append(f"accepted missing final SELF alignment padding ({missing_padding} bytes)")
 
-    # Some dumped containers append a complete SCE COMMENT after selfSize.
+    # Some dumped containers append an unsigned SCE COMMENT / LIBVERSION trailer after selfSize.
     tail_size = len(data) - self_size
     if tail_size > 0:
         candidates = [i for i, header in enumerate(headers)
-                      if header[0] == 0x6fffff01 and i not in assigned]
-        require(len(candidates) == 1,
-                "unsupported unsigned SELF trailer")
-        comment = headers[candidates[0]]
-        destination, declared_size = comment[2], comment[5]
-        if tail_size == declared_size:
-            require(fits(destination, tail_size, max_size), "trailer exceeds output size limit")
-            require(not any(overlaps((destination, tail_size), (start, length))
-                            for start, length, _ in copies),
-                    "trailer overlaps ELF payload")
-            copies.append((destination, tail_size, self_size))
-        else:
-            require(tail_size < declared_size and comment[1] == 0 and comment[3] == 0,
-                    "unsupported unsigned SELF trailer")
-            # A truncated, non-loadable comment cannot supply runtime bytes.
-            # Strip its header instead of inventing the missing metadata.
+                      if header[0] in (0x6fffff00, 0x6fffff01)
+                      and i not in assigned and header[5] > 0
+                      and not covered(header[2], header[5], copies)]
+        if not candidates and tail_size < 16 and len(data) % 16 == 0 and data[self_size:] == bytes(tail_size):
             if notices is not None:
-                notices.append(f"stripped incomplete SCE COMMENT ({tail_size}/{declared_size} bytes)")
+                notices.append(f"ignored trailing SELF alignment padding ({tail_size} bytes)")
+        elif len(candidates) == 1:
+            comment = headers[candidates[0]]
+            destination, declared_size = comment[2], comment[5]
+            if tail_size == declared_size:
+                require(fits(destination, tail_size, max_size), "trailer exceeds output size limit")
+                require(compatible_copy(data, destination, tail_size, self_size, copies),
+                        "trailer overlaps ELF payload")
+                copies.append((destination, tail_size, self_size))
+            else:
+                require(tail_size < declared_size and comment[1] & ~0x4 == 0
+                        and comment[3] == 0 and comment[6] == 0,
+                        "unsupported unsigned SELF trailer")
+                # A truncated, non-loadable comment cannot supply runtime bytes.
+                # Strip its header instead of inventing the missing metadata.
+                if notices is not None:
+                    notices.append(f"stripped incomplete SCE COMMENT ({tail_size}/{declared_size} bytes)")
+        else:
+            ordered = sorted(candidates, key=lambda idx: headers[idx][2])
+            contiguous = len(ordered) > 1 and all(
+                headers[ordered[k]][2] + headers[ordered[k]][5] == headers[ordered[k + 1]][2]
+                for k in range(len(ordered) - 1)
+            )
+            total_declared = sum(headers[idx][5] for idx in ordered)
+            require(contiguous and tail_size == total_declared,
+                    "unsupported unsigned SELF trailer")
+            cursor = self_size
+            for idx in ordered:
+                destination, declared_size = headers[idx][2], headers[idx][5]
+                require(fits(destination, declared_size, max_size),
+                        "trailer exceeds output size limit")
+                require(compatible_copy(data, destination, declared_size, cursor, copies),
+                        "trailer overlaps ELF payload")
+                copies.append((destination, declared_size, cursor))
+                cursor += declared_size
 
     omitted = []
     for i, header in enumerate(headers):
@@ -219,7 +272,12 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
                 f"missing payload for program header {i}")
         omitted.append(i)
 
-    output_size = max(start + size for start, size, _ in copies if size)
+    output_size = max(
+        [start + size for start, size, _ in copies if size]
+        + [header[2] for header in headers
+           if header[0] != 0 and header[5] == 0
+           and (header[0] == 1 or header[6] > 0 or header[3] != 0)]
+    )
     output = bytearray(output_size)
     for destination, size, source in copies:
         output[destination:destination + size] = data[source:source + size]
@@ -243,8 +301,8 @@ def self_to_elf(data, max_size=DEFAULT_MAX_SIZE, notices=None):
 
 
 def is_optional_metadata_segment(kind, flags, address, memory_size):
-    return flags == 0 and address == 0 and (
-        (kind == 4 and memory_size == 0) or kind in (0x6fffff00, 0x6fffff01))
+    return flags & ~0x4 == 0 and address == 0 and memory_size == 0 and kind in (
+        4, 0x6fffff00, 0x6fffff01)
 
 
 def section_table_error(data, ph_offset=64, ph_count=0):
@@ -295,7 +353,7 @@ def validate_elf(data):
     require(len(data) >= 64 and data[:7] == ELF_MAGIC + b"\x02\x01\x01",
             "expected little-endian ELF64")
     elf = struct.unpack_from("<16sHHIQQQIHHHHHH", data)
-    require(elf[2] == 62 and elf[3] == 1 and elf[8] == 64,
+    require(elf[1] != 0 and elf[2] == 62 and elf[3] == 1 and elf[8] == 64,
             "expected ELF64 x86-64")
     ph_offset, ph_size, ph_count = elf[5], elf[9], elf[10]
     require(ph_size == 56 and ph_offset >= 64 and 0 < ph_count < 0xffff
@@ -311,12 +369,16 @@ def validate_elf(data):
             require(raw == bytes(ph_size), f"ELF program header {i}: non-zero PT_NULL entry")
             continue
         require(fits(offset, size, len(data)), f"ELF program header {i}: payload outside file")
+        require(fits(address, memory_size, (1 << 64) - 1),
+                f"ELF program header {i}: memory range overflow")
+        if kind == 6 and size > 0:
+            require(offset == ph_offset and size % ph_size == 0
+                    and size <= ph_count * ph_size,
+                    f"ELF program header {i}: invalid PT_PHDR range")
         if kind != 1:
             continue
         require(size <= memory_size and flags & ~7 == 0,
                 f"ELF program header {i}: invalid load segment")
-        require(fits(address, memory_size, (1 << 64) - 1),
-                f"ELF program header {i}: memory range overflow")
         require(alignment <= 1 or (
             alignment & (alignment - 1) == 0 and offset % alignment == address % alignment),
             f"ELF program header {i}: invalid load alignment")
@@ -396,6 +458,8 @@ def replace_in_place(path, output):
 
 def replace_with_backup(path, output, backup):
     require(not os.path.lexists(backup), f"backup already exists: {backup}")
+    if os.name == "nt":
+        require(os.access(path, os.W_OK), f"file is read-only: {path}")
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -582,10 +646,14 @@ def main():
     args = parser.parse_args()
     if args.max_output_mib <= 0:
         parser.error("--max-output-mib must be positive")
-    root = args.path.resolve()
-    if root.is_dir():
+    root = args.path.absolute() if args.path.is_symlink() else args.path.resolve()
+    if root.is_symlink() and root.suffix.lower() in (".prx", ".bin"):
+        paths = [root]
+        base = root.parent
+    elif root.is_dir() and not root.is_symlink():
         paths = sorted(path for path in root.rglob("*")
-                       if path.suffix.lower() in (".prx", ".bin") and path.is_file())
+                       if path.suffix.lower() in (".prx", ".bin")
+                       and (path.is_file() or path.is_symlink()))
         base = root
     elif root.is_file() and root.suffix.lower() in (".prx", ".bin"):
         paths = [root]
